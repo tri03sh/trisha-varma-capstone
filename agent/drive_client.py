@@ -18,6 +18,10 @@ import json
 import os
 from pathlib import Path
 
+import zipfile
+
+import docx
+from docx.opc.exceptions import PackageNotFoundError
 from flask import g, has_request_context, session
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -50,6 +54,12 @@ FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 # API (unlike Gemini's multimodal document blocks), so text is extracted
 # locally with pypdf and treated like any other text file from then on.
 DOCUMENT_MIME_TYPES = {"application/pdf"}
+
+# .docx (the modern, XML-based Word format) is handled the same way, via
+# python-docx. The legacy binary .doc format (application/msword) isn't
+# supported - python-docx can't read it - so it still falls through to
+# "unreadable" below, same as before.
+WORD_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 # Images are intentionally not extracted - this agent's job is project text
 # content (briefs, research notes, decisions), not visual analysis. Skipping
@@ -242,11 +252,22 @@ def _extract_pdf_text(raw: bytes) -> str:
     return "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
 
 
+def _extract_docx_text(raw: bytes) -> str:
+    document = docx.Document(io.BytesIO(raw))
+    parts = [p.text for p in document.paragraphs if p.text]
+    for table in document.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text for cell in row.cells if cell.text)
+            if row_text:
+                parts.append(row_text)
+    return "\n\n".join(parts).strip()
+
+
 def read_file(file_id: str) -> dict:
     """Read a Drive file. Returns one of:
     - {"kind": "text", "text": str}
-      (includes PDFs - text extracted locally with pypdf, since the LLM has no
-      native "read this document" input)
+      (includes PDFs and .docx - text extracted locally with pypdf/python-docx,
+      since the LLM has no native "read this document" input)
     - {"kind": "unreadable", "message": str}
       (includes images - intentionally not extracted, see IMAGE_MIME_PREFIX above)
     """
@@ -282,6 +303,16 @@ def read_file(file_id: str) -> dict:
                 return {"kind": "unreadable", "message": f"Could not parse '{name}' as a PDF: {exc}"}
             if not text:
                 return {"kind": "unreadable", "message": f"'{name}' is a PDF with no extractable text (scanned/image-only page?)."}
+            return {"kind": "text", "text": text}
+
+        if mime_type in WORD_MIME_TYPES:
+            raw = _download_bytes(file_id)
+            try:
+                text = _extract_docx_text(raw)
+            except (PackageNotFoundError, zipfile.BadZipFile) as exc:
+                return {"kind": "unreadable", "message": f"Could not parse '{name}' as a .docx file: {exc}"}
+            if not text:
+                return {"kind": "unreadable", "message": f"'{name}' is a .docx file with no extractable text."}
             return {"kind": "text", "text": text}
 
         if mime_type.startswith(TEXT_MIME_PREFIXES) or mime_type in TEXT_MIME_EXACT:

@@ -221,10 +221,11 @@ TOOL_DECLARATIONS = [
             "name": "read_file",
             "description": (
                 "Read a Google Drive file. Google Docs, Sheets, and Slides are exported as "
-                "text/CSV. Plain text, markdown, and JSON files are read directly. PDFs are "
-                "read as text. Images and other unsupported file types return a message "
-                "noting the file was found but not read - this agent extracts text/PDF "
-                "project content only, not visual content."
+                "text/CSV. Plain text, markdown, and JSON files are read directly. PDFs and "
+                ".docx files are read as text (the legacy .doc format is not supported). "
+                "Images and other unsupported file types return a message noting the file "
+                "was found but not read - this agent extracts text project content only, "
+                "not visual content."
             ),
             "parameters": {
                 "type": "object",
