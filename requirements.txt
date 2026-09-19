@@ -1,0 +1,8 @@
+groq>=1.7.0
+pypdf>=6.19.0
+flask>=3.0.0
+gunicorn>=23.0.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.130.0
+python-dotenv>=1.0.0
