@@ -250,6 +250,11 @@ def auth_login():
         prompt="consent",
     )
     session["oauth_state"] = state
+    # PKCE: Flow generates this when authorization_url() is called above, but
+    # only keeps it on this Flow instance - /auth/callback builds a separate
+    # Flow object, so the verifier has to be carried across via the session
+    # or fetch_token() fails with "Missing code verifier".
+    session["code_verifier"] = flow.code_verifier
     return redirect(authorization_url)
 
 
@@ -259,7 +264,10 @@ def auth_callback():
     if not state or state != request.args.get("state"):
         return "Invalid or expired sign-in attempt - please try signing in again.", 400
 
-    flow = drive_client.build_auth_flow(url_for("auth_callback", _external=True))
+    flow = drive_client.build_auth_flow(
+        url_for("auth_callback", _external=True),
+        code_verifier=session.get("code_verifier"),
+    )
     try:
         flow.fetch_token(authorization_response=request.url)
     except Exception as exc:  # noqa: BLE001 - surfaced directly, this is an auth-time failure
@@ -268,6 +276,7 @@ def auth_callback():
     session.permanent = True
     session["credentials"] = drive_client.credentials_to_dict(flow.credentials)
     session.pop("oauth_state", None)
+    session.pop("code_verifier", None)
     return redirect(url_for("index"))
 
 

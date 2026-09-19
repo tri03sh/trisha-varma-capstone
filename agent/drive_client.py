@@ -100,12 +100,22 @@ def _get_credentials():
     return creds
 
 
-def build_auth_flow(redirect_uri: str) -> Flow:
+def build_auth_flow(redirect_uri: str, code_verifier: str | None = None) -> Flow:
     """Build a web OAuth Flow for the given callback URL (see agent/web.py's
     /auth/login and /auth/callback routes). `redirect_uri` must exactly
     match an Authorized redirect URI registered on this OAuth client in
-    Google Cloud Console."""
-    flow = Flow.from_client_config(_load_client_config(), SCOPES)
+    Google Cloud Console.
+
+    PKCE note: Flow generates its own `code_verifier` the first time
+    `authorization_url()` is called and stores it only on that Flow
+    instance - it's never sent to Google as part of the redirect (only its
+    hashed `code_challenge` is). Since /auth/login and /auth/callback are
+    separate requests, each building a fresh Flow, the verifier has to be
+    threaded through explicitly (via the session) or `fetch_token()` fails
+    with "Missing code verifier". Callers must pass back whatever
+    `flow.code_verifier` was after the /auth/login call.
+    """
+    flow = Flow.from_client_config(_load_client_config(), SCOPES, code_verifier=code_verifier)
     flow.redirect_uri = redirect_uri
     return flow
 
