@@ -77,6 +77,18 @@ MAX_TOTAL_TEXT_CHARS = 9000
 MIN_CONTENT_WORDS_FOR_DRAFT = 300
 
 
+class LiveLog(list):
+    """A log list that also prints each line as it's appended, with a
+    timestamp - so a generation's progress (Drive retrieval, tool calls,
+    retries) shows up in real time in `railway logs` / gunicorn's stdout,
+    not just in the JSON response after the request finishes (or never
+    finishes, if it's stuck)."""
+
+    def append(self, item: str) -> None:
+        print(f"[{time.strftime('%H:%M:%S')}] {item}", flush=True)
+        super().append(item)
+
+
 def strip_markdown(text: str) -> str:
     """Convert markdown formatting to plain text. The system prompt asks the
     model not to use markdown, but this is a deterministic backstop - the
@@ -521,7 +533,7 @@ def generate_case_study(folder_name: str) -> dict:
     INSUFFICIENT_INFO_MARKER) - the caller can use this to render a
     prominent notice instead of treating it like a normal draft.
     """
-    log: list = []
+    log: list = LiveLog()
     folder_name = folder_name.strip()
 
     try:
