@@ -91,6 +91,12 @@ PAGE = """<!doctype html>
     cursor: pointer;
   }
   button:disabled { background: #93b4f0; cursor: not-allowed; }
+  .directions {
+    color: #666;
+    font-size: 0.9rem;
+    margin: -8px 0 24px 0;
+  }
+  .directions p { margin: 6px 0; }
   #status { display: none; color: #555; margin-bottom: 16px; }
   #status.visible { display: block; }
   .spinner {
@@ -115,15 +121,6 @@ PAGE = """<!doctype html>
     white-space: pre-wrap;
   }
   #error.visible { display: block; }
-  #log {
-    display: none;
-    font-size: 0.85rem;
-    color: #777;
-    white-space: pre-wrap;
-    margin-bottom: 16px;
-    font-family: ui-monospace, monospace;
-  }
-  #log.visible { display: block; }
   #result {
     display: none;
     white-space: pre-wrap;
@@ -156,9 +153,13 @@ PAGE = """<!doctype html>
       <button type="submit" id="submit-btn">Generate</button>
     </form>
 
+    <div class="directions">
+      <p><strong>How to use this:</strong> enter the name of a project folder from your connected Google Drive. The agent reads the files inside it - Google Docs, Sheets, Slides, PDFs, and .docx files - and drafts a case study from what it finds.</p>
+      <p>This works best when the folder's content is genuinely about your project and there's enough of it. If the content is too sparse, unrelated, or unreadable, the agent will say so rather than guessing. Alongside the draft, you may also get a few missing-information questions if something important isn't documented, and suggested spots to add your own images.</p>
+    </div>
+
     <div id="status"><span class="spinner"></span>Retrieving files and drafting the case study...</div>
     <div id="error"></div>
-    <div id="log"></div>
     <div id="result"></div>
   </div>
 
@@ -168,7 +169,6 @@ PAGE = """<!doctype html>
     const button = document.getElementById("submit-btn");
     const statusEl = document.getElementById("status");
     const errorEl = document.getElementById("error");
-    const logEl = document.getElementById("log");
     const resultEl = document.getElementById("result");
 
     form.addEventListener("submit", async (event) => {
@@ -180,10 +180,8 @@ PAGE = """<!doctype html>
       input.disabled = true;
       statusEl.classList.add("visible");
       errorEl.classList.remove("visible");
-      logEl.classList.remove("visible");
       resultEl.classList.remove("visible");
       errorEl.textContent = "";
-      logEl.textContent = "";
       resultEl.textContent = "";
 
       try {
@@ -199,11 +197,6 @@ PAGE = """<!doctype html>
         }
 
         const data = await response.json();
-
-        if (data.log && data.log.length) {
-          logEl.textContent = data.log.join("\\n");
-          logEl.classList.add("visible");
-        }
 
         if (data.ok) {
           resultEl.innerHTML = "";
