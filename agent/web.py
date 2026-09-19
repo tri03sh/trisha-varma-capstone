@@ -154,7 +154,7 @@ PAGE = """<!doctype html>
     </form>
 
     <div class="directions">
-      <p><strong>How to use this:</strong> enter the name of a project folder from your connected Google Drive. The agent reads the files inside it - Google Docs, Sheets, Slides, PDFs, and .docx files - and drafts a case study from what it finds.</p>
+      <p><strong>How to use this:</strong> enter the name of a project folder from your connected Google Drive. The agent reads the files inside it - Google Docs, Slides, PDFs, and .docx files - and drafts a case study from what it finds.</p>
       <p>This works best when the folder's content is genuinely about your project and there's enough of it. If the content is too sparse, unrelated, or unreadable, the agent will say so rather than guessing. Alongside the draft, you may also get a few missing-information questions if something important isn't documented, and suggested spots to add your own images.</p>
     </div>
 
