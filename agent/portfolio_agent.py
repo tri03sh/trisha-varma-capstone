@@ -51,18 +51,20 @@ REQUEST_TIMEOUT_S = 120.0
 # measured tokens-per-minute (ITPM) limit on MODEL - 8000 for
 # openai/gpt-oss-120b, measured directly via response headers
 # (x-ratelimit-limit-tokens). The system prompt + tool schema alone cost
-# ~3900 tokens as of the last measurement (via response.usage.prompt_tokens
+# ~4500 tokens as of the last measurement (via response.usage.prompt_tokens
 # - it keeps growing as skills/*.md gain guidance, so re-measure whenever
-# they change), leaving ~4100 tokens of headroom; these caps target well
-# under that (~3000 tokens of text, ~12000 chars) to leave room for
-# tool-call round trips within the same rolling minute. If the margin gets
-# much tighter, shrink these caps rather than let a generation risk a 413.
-# Re-measure both numbers if MODEL ever changes - ITPM limits are set
-# per-model, not account-wide.
+# they change), leaving ~3500 tokens of headroom; these caps target well
+# under that (~2250 tokens of text, ~9000 chars) to leave real margin for
+# tool-call round trips within the same rolling minute. There's no fallback
+# left for an oversized request (that was removed with the Visual Curator) -
+# a 413 here is a hard failure, so keep shrinking these caps as the system
+# prompt grows rather than let the margin erode to nothing. Re-measure both
+# numbers if MODEL ever changes - ITPM limits are set per-model, not
+# account-wide.
 MAX_PREFETCH_FILES = 40
 MAX_PREFETCH_DEPTH = 6
-MAX_FILE_CHARS = 12000
-MAX_TOTAL_TEXT_CHARS = 12000
+MAX_FILE_CHARS = 9000
+MAX_TOTAL_TEXT_CHARS = 9000
 
 # Below this many total retrieved words, a folder is deterministically
 # treated as too sparse for any Case Study Draft section (the "relevant but

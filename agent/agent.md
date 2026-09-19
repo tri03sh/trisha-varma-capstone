@@ -167,7 +167,7 @@ Check:
 
 ### Step 8: Respond
 
-If sufficient information is available:
+If sufficient information is available for at least some sections:
 
 - Produce a structured case study draft.
 - Use clear section titles, each on its own line - as plain text, not markdown
@@ -177,11 +177,19 @@ If sufficient information is available:
   rendered.
 - Base claims on the retrieved project documentation.
 
-If important information is missing:
+Separately - and regardless of whether a draft was produced - check every section for gaps:
 
-- Explain what information is missing.
+- Explain what information is missing, section by section.
 - Ask specific, targeted questions.
 - Do not invent details to complete the case study.
+
+Producing a Case Study Draft does not mean skipping this check. A draft covering most
+sections well can still be missing real substance in others (e.g. no documented outcome,
+no research method, no stated design goals) - that is the normal case, not the exception,
+and it still needs a Missing Information and Questions for the User section. Mentioning a
+gap naturally within the narrative prose (per the Portfolio Guide Skill) does not replace
+listing it here - do both. Only skip Missing Information and Questions for the User if,
+after checking every section, there genuinely isn't a single gap worth flagging.
 
 Treat the retrieved material as insufficient for any Case Study Draft section - producing only Missing Information and Questions for the User - whenever any of the following is true, even if the deterministic check in the retrieved-content summary says otherwise:
 
