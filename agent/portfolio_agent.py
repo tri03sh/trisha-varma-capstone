@@ -147,6 +147,21 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
     return DEFAULT_RETRY_DELAY * (2**attempt)
 
 
+# Groq's own suggested backoff (from a 429's Retry-After header) can be very
+# long - minutes, not seconds - when a real account-level rate limit has
+# been hit (e.g. from heavy same-day testing). Blocking a web request for
+# that long is bad UX (the browser just hangs) and risks exceeding
+# gunicorn's own worker timeout anyway if a second retry is also
+# rate-limited. Past this threshold, fail fast with a clear message instead
+# of actually waiting it out.
+MAX_RATE_LIMIT_WAIT_S = 20.0
+
+
+class RateLimitTooLong(Exception):
+    """Raised instead of waiting when Groq's suggested backoff exceeds
+    MAX_RATE_LIMIT_WAIT_S - see create_completion."""
+
+
 _CALL_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 
@@ -171,9 +186,14 @@ def create_completion(client: Groq, log: list | None = None, **kwargs):
         except FuturesTimeoutError:
             raise TimeoutError(f"Groq did not respond within {REQUEST_TIMEOUT_S:.0f}s.") from None
         except groq.RateLimitError as exc:
+            delay = _retry_delay(exc, attempt)
+            if delay > MAX_RATE_LIMIT_WAIT_S:
+                raise RateLimitTooLong(
+                    f"Groq's rate limit was hit, and it's asking for a {delay:.0f}s wait before "
+                    "trying again - please wait a few minutes and try again."
+                ) from exc
             if attempt == MAX_RATE_LIMIT_RETRIES:
                 raise
-            delay = _retry_delay(exc, attempt)
             if log is not None:
                 log.append(f"Rate limited by Groq - retrying in {delay:.0f}s ({attempt + 1}/{MAX_RATE_LIMIT_RETRIES})...")
             time.sleep(delay)
@@ -646,6 +666,8 @@ def generate_case_study(folder_name: str) -> dict:
     try:
         raw_output, tool_errors = resolve_tool_calls(client, messages, log, scope=scope)
     except TimeoutError as exc:
+        return {"ok": False, "output": "", "error": str(exc), "log": log}
+    except RateLimitTooLong as exc:
         return {"ok": False, "output": "", "error": str(exc), "log": log}
     except groq.RateLimitError:
         return {
