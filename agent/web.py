@@ -164,6 +164,23 @@ PAGE = """<!doctype html>
     font-size: 1rem;
     white-space: pre-wrap;
   }
+  .image-placeholder {
+    display: block;
+    margin: 16px 0;
+    padding: 16px;
+    border: 2px dashed #b8b8b8;
+    border-radius: 8px;
+    background: #f5f5f7;
+    text-align: center;
+    white-space: normal;
+  }
+  .image-placeholder-label {
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .image-placeholder-caption {
+    color: #555;
+  }
   #revise-section { margin-top: 16px; }
   #revise-section.hidden { display: none; }
   textarea {
@@ -297,11 +314,19 @@ PAGE = """<!doctype html>
         if (match.index > lastIndex) {
           parent.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
         }
-        parent.appendChild(document.createTextNode("["));
-        const label = document.createElement("strong");
-        label.textContent = "Suggested image:";
-        parent.appendChild(label);
-        parent.appendChild(document.createTextNode(match[1] + "]"));
+        // A block-level div amid inline text nodes naturally breaks the surrounding flow
+        // on both sides, so this renders as its own rectangle, not inline bracketed text.
+        const box = document.createElement("div");
+        box.className = "image-placeholder";
+        const label = document.createElement("div");
+        label.className = "image-placeholder-label";
+        label.textContent = "Suggested image";
+        const caption = document.createElement("div");
+        caption.className = "image-placeholder-caption";
+        caption.textContent = match[1].trim();
+        box.appendChild(label);
+        box.appendChild(caption);
+        parent.appendChild(box);
         lastIndex = pattern.lastIndex;
       }
       if (lastIndex < text.length) {
