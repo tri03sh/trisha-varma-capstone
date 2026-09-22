@@ -173,10 +173,16 @@ PAGE = """<!doctype html>
     background: #f5f5f7;
     text-align: center;
     white-space: normal;
+    /* Box background is fixed light regardless of OS/browser color scheme (this page
+       declares "color-scheme: light dark" at :root), so text inside it needs an
+       explicit dark color rather than inheriting the default, which flips to a light
+       color under a dark color scheme and becomes unreadable against this background. */
+    color: #333;
   }
   .image-placeholder-label {
     font-weight: 700;
     margin-bottom: 4px;
+    color: #222;
   }
   .image-placeholder-caption {
     color: #555;
