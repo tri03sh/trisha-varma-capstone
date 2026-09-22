@@ -159,16 +159,21 @@ def normalize_section_title(title: str) -> str:
 
 
 def parse_sections(raw: str) -> list[dict]:
-    """Split raw model output on SECTION_DELIMITER lines into an ordered list of
+    """Split raw model output on SECTION_DELIMITER into an ordered list of
     {"title", "body"} dicts - the first non-blank line of each block is the title, the
     rest is the body. Falls back to a single section (rather than an empty list) if the
     model didn't include any delimiters, so a working draft is never lost to a parsing
-    miss."""
+    miss.
+
+    Splits on the delimiter wherever it occurs, not just when it's alone on its own
+    line - the model sometimes runs it directly onto the end of the preceding text (e.g.
+    "[Suggested image: ...]===SECTION===Context") with no line break, which a
+    line-anchored regex would miss entirely and leave in the visible output."""
     raw = (raw or "").strip()
     if not raw:
         return []
 
-    blocks = re.split(rf"(?m)^[ \t]*{re.escape(SECTION_DELIMITER)}[ \t]*$", raw)
+    blocks = raw.split(SECTION_DELIMITER)
     sections = []
     for block in blocks:
         block = block.strip()
@@ -185,8 +190,13 @@ def parse_sections(raw: str) -> list[dict]:
 
 def join_sections(sections: list[dict]) -> str:
     """Inverse of parse_sections for display/finalize output - title, blank line, body,
-    blank line, next title..."""
-    return "\n\n".join(f"{s['title']}\n\n{s['body']}".strip() for s in sections if s.get("body") or s.get("title"))
+    blank line, next title... Used everywhere sections are turned back into the text
+    shown to the user (turn one's draft, a revision round's output, finalize's merged
+    result), so a final safety-net strip of any leftover literal SECTION_DELIMITER lives
+    here too - parse_sections should already consume every occurrence, but this is a
+    single, cheap backstop against one slipping through into visible output."""
+    text = "\n\n".join(f"{s['title']}\n\n{s['body']}".strip() for s in sections if s.get("body") or s.get("title"))
+    return text.replace(SECTION_DELIMITER, "").strip()
 
 
 def merge_sections(original_sections: list[dict], section_updates: dict[str, dict]) -> list[dict]:

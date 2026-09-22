@@ -269,6 +269,32 @@ PAGE = """<!doctype html>
       errorEl.classList.add("visible");
     }
 
+    // Renders draft text into `container` as plain text (never innerHTML - this is
+    // model output, so it's never trusted as markup), except that a
+    // "[Suggested image: ...]" placeholder gets its "Suggested image:" label bolded.
+    // Every other character, including the placeholder's own description, still goes
+    // through createTextNode/textContent.
+    function renderOutputText(container, text) {
+      container.innerHTML = "";
+      const pattern = /\\[Suggested image:([^\\]]*)\\]/g;
+      let lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+          container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        }
+        container.appendChild(document.createTextNode("["));
+        const label = document.createElement("strong");
+        label.textContent = "Suggested image:";
+        container.appendChild(label);
+        container.appendChild(document.createTextNode(match[1] + "]"));
+        lastIndex = pattern.lastIndex;
+      }
+      if (lastIndex < text.length) {
+        container.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+    }
+
     function updateRoundsUI() {
       if (turnsRemaining > 0) {
         answerForm.classList.remove("hidden");
@@ -322,7 +348,7 @@ PAGE = """<!doctype html>
             resultEl.appendChild(notice);
           }
           const body = document.createElement("div");
-          body.textContent = data.output;
+          renderOutputText(body, data.output);
           resultEl.appendChild(body);
           resultEl.classList.add("visible");
 
@@ -375,7 +401,7 @@ PAGE = """<!doctype html>
           label.className = "revision-label";
           label.textContent = "Update";
           const body = document.createElement("div");
-          body.textContent = data.output;
+          renderOutputText(body, data.output);
           item.appendChild(label);
           item.appendChild(body);
           revisionsEl.appendChild(item);
@@ -419,7 +445,7 @@ PAGE = """<!doctype html>
           label.className = "final-label";
           label.textContent = "Final Case Study";
           const body = document.createElement("div");
-          body.textContent = data.output;
+          renderOutputText(body, data.output);
           finalResultEl.appendChild(label);
           finalResultEl.appendChild(body);
           finalResultEl.classList.add("visible");
