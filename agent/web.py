@@ -15,6 +15,8 @@ Procfile) - main() below is only used for local dev.
 """
 
 import os
+import time
+import uuid
 from datetime import timedelta
 
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
@@ -43,6 +45,23 @@ if not SECRET_KEY:
     )
 app.secret_key = SECRET_KEY
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+
+# In-memory store of follow-up revision conversations (see agent.ConversationState),
+# keyed by an opaque generation id handed to the browser. Fine for the current
+# single-worker gunicorn deployment (Procfile has no --workers flag); would need to move
+# to Redis/a DB if this app is ever scaled to multiple workers/processes, since each
+# worker would otherwise have its own disjoint copy of this dict.
+CONVERSATIONS: dict[str, agent.ConversationState] = {}
+
+
+def _cleanup_conversations() -> None:
+    """Purge conversations older than CONVERSATION_TTL_S so an abandoned session doesn't
+    grow this store forever on a long-lived worker."""
+    cutoff = time.monotonic() - agent.CONVERSATION_TTL_S
+    expired = [gid for gid, conv in CONVERSATIONS.items() if conv.created_at < cutoff]
+    for gid in expired:
+        CONVERSATIONS.pop(gid, None)
+
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -134,6 +153,53 @@ PAGE = """<!doctype html>
     font-size: 1.3rem;
     margin-bottom: 14px;
   }
+  #revise-section { margin-top: 16px; }
+  #revise-section.hidden { display: none; }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    font-size: 1rem;
+    font-family: inherit;
+    border: 1px solid #999;
+    border-radius: 6px;
+    resize: vertical;
+    margin-bottom: 8px;
+  }
+  #answer-form.hidden { display: none; }
+  #rounds-indicator { font-size: 0.85rem; }
+  .revision-item {
+    white-space: pre-wrap;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-top: 16px;
+  }
+  .revision-label {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: #666;
+    margin-bottom: 8px;
+  }
+  #rounds-used-note.hidden { display: none; }
+  #finalize-btn { margin-top: 16px; }
+  #finalize-btn.hidden { display: none; }
+  #final-result {
+    display: none;
+    white-space: pre-wrap;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 20px;
+    margin-top: 16px;
+  }
+  #final-result.visible { display: block; }
+  .final-label {
+    font-weight: 700;
+    font-size: 1.1rem;
+    margin-bottom: 12px;
+  }
 </style>
 </head>
 <body>
@@ -161,6 +227,20 @@ PAGE = """<!doctype html>
     <div id="status"><span class="spinner"></span>Retrieving files and drafting the case study...</div>
     <div id="error"></div>
     <div id="result"></div>
+
+    <div id="revise-section" class="hidden">
+      <div id="revisions"></div>
+
+      <form id="answer-form" class="hidden">
+        <p class="sub" id="rounds-indicator"></p>
+        <textarea id="answer-input" rows="3" placeholder="Answer a question, or add information the draft is missing..."></textarea>
+        <button type="submit" id="answer-btn">Send</button>
+      </form>
+      <p class="directions hidden" id="rounds-used-note">You've used all your follow-up rounds for this draft. Click below to build the final case study.</p>
+
+      <button id="finalize-btn" class="hidden">Finish &amp; Build Final Case Study</button>
+      <div id="final-result"></div>
+    </div>
   </div>
 
   <script>
@@ -170,6 +250,35 @@ PAGE = """<!doctype html>
     const statusEl = document.getElementById("status");
     const errorEl = document.getElementById("error");
     const resultEl = document.getElementById("result");
+
+    const reviseSection = document.getElementById("revise-section");
+    const revisionsEl = document.getElementById("revisions");
+    const answerForm = document.getElementById("answer-form");
+    const answerInput = document.getElementById("answer-input");
+    const answerBtn = document.getElementById("answer-btn");
+    const roundsIndicator = document.getElementById("rounds-indicator");
+    const roundsUsedNote = document.getElementById("rounds-used-note");
+    const finalizeBtn = document.getElementById("finalize-btn");
+    const finalResultEl = document.getElementById("final-result");
+
+    let generationId = null;
+    let turnsRemaining = 0;
+
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.classList.add("visible");
+    }
+
+    function updateRoundsUI() {
+      if (turnsRemaining > 0) {
+        answerForm.classList.remove("hidden");
+        roundsUsedNote.classList.add("hidden");
+        roundsIndicator.textContent = `${turnsRemaining} follow-up round(s) left.`;
+      } else {
+        answerForm.classList.add("hidden");
+        roundsUsedNote.classList.remove("hidden");
+      }
+    }
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -183,6 +292,12 @@ PAGE = """<!doctype html>
       resultEl.classList.remove("visible");
       errorEl.textContent = "";
       resultEl.textContent = "";
+      reviseSection.classList.add("hidden");
+      revisionsEl.innerHTML = "";
+      finalResultEl.classList.remove("visible");
+      finalResultEl.textContent = "";
+      generationId = null;
+      turnsRemaining = 0;
 
       try {
         const response = await fetch("/api/generate", {
@@ -210,17 +325,111 @@ PAGE = """<!doctype html>
           body.textContent = data.output;
           resultEl.appendChild(body);
           resultEl.classList.add("visible");
+
+          if (data.generation_id) {
+            generationId = data.generation_id;
+            turnsRemaining = data.turns_remaining || 0;
+            reviseSection.classList.remove("hidden");
+            finalizeBtn.classList.remove("hidden");
+            updateRoundsUI();
+          }
         } else {
-          errorEl.textContent = data.error || "Something went wrong.";
-          errorEl.classList.add("visible");
+          showError(data.error || "Something went wrong.");
         }
       } catch (err) {
-        errorEl.textContent = "Request failed: " + err;
-        errorEl.classList.add("visible");
+        showError("Request failed - the connection was lost, possibly because generation took too long. Please try again.");
       } finally {
         button.disabled = false;
         input.disabled = false;
         statusEl.classList.remove("visible");
+      }
+    });
+
+    answerForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const answer = answerInput.value.trim();
+      if (!answer || !generationId) return;
+
+      answerBtn.disabled = true;
+      answerInput.disabled = true;
+      errorEl.classList.remove("visible");
+
+      try {
+        const response = await fetch("/api/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generation_id: generationId, answer }),
+        });
+
+        if (response.status === 401) {
+          window.location.href = "/auth/login";
+          return;
+        }
+
+        const data = await response.json();
+
+        if (data.ok) {
+          const item = document.createElement("div");
+          item.className = "revision-item";
+          const label = document.createElement("div");
+          label.className = "revision-label";
+          label.textContent = "Update";
+          const body = document.createElement("div");
+          body.textContent = data.output;
+          item.appendChild(label);
+          item.appendChild(body);
+          revisionsEl.appendChild(item);
+          answerInput.value = "";
+          turnsRemaining = data.turns_remaining ?? turnsRemaining;
+          updateRoundsUI();
+        } else {
+          showError(data.error || "Something went wrong.");
+        }
+      } catch (err) {
+        showError("Request failed - the connection was lost. Please try again.");
+      } finally {
+        answerBtn.disabled = false;
+        answerInput.disabled = false;
+      }
+    });
+
+    finalizeBtn.addEventListener("click", async () => {
+      if (!generationId) return;
+
+      finalizeBtn.disabled = true;
+      errorEl.classList.remove("visible");
+
+      try {
+        const response = await fetch("/api/finalize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generation_id: generationId }),
+        });
+
+        if (response.status === 401) {
+          window.location.href = "/auth/login";
+          return;
+        }
+
+        const data = await response.json();
+
+        if (data.ok) {
+          finalResultEl.innerHTML = "";
+          const label = document.createElement("div");
+          label.className = "final-label";
+          label.textContent = "Final Case Study";
+          const body = document.createElement("div");
+          body.textContent = data.output;
+          finalResultEl.appendChild(label);
+          finalResultEl.appendChild(body);
+          finalResultEl.classList.add("visible");
+        } else {
+          showError(data.error || "Something went wrong.");
+        }
+      } catch (err) {
+        showError("Request failed - the connection was lost. Please try again.");
+      } finally {
+        finalizeBtn.disabled = false;
       }
     });
   </script>
@@ -289,13 +498,90 @@ def api_generate():
     if not folder_name:
         return jsonify(ok=False, error="Enter a Drive folder name.", output="", log=[]), 400
 
+    _cleanup_conversations()
+
     try:
         result = agent.generate_case_study(folder_name)
     except Exception as exc:  # noqa: BLE001 - last-resort guard so the page always gets JSON, never a raw 500 page
         return jsonify(ok=False, error=f"Unexpected error: {exc}", output="", log=[]), 500
 
+    if result["ok"] and result.get("sections"):
+        generation_id = uuid.uuid4().hex
+        CONVERSATIONS[generation_id] = agent.ConversationState(
+            folder_name=result["folder_name"],
+            original_sections=result["sections"],
+        )
+        session.permanent = True
+        session["generation_ids"] = session.get("generation_ids", []) + [generation_id]
+        result = {**result, "generation_id": generation_id, "turns_remaining": agent.MAX_FOLLOWUP_TURNS}
+    result.pop("sections", None)
+
     status_code = 200 if result["ok"] else 502
     return jsonify(result), status_code
+
+
+def _get_owned_conversation(generation_id: str) -> agent.ConversationState | None:
+    """Look up `generation_id` in CONVERSATIONS, but only if it belongs to the current
+    signed-in browser session (see session["generation_ids"]) - stops one visitor from
+    reaching another's in-progress conversation even though the id itself is also
+    unguessable."""
+    if not generation_id or generation_id not in session.get("generation_ids", []):
+        return None
+    return CONVERSATIONS.get(generation_id)
+
+
+@app.route("/api/answer", methods=["POST"])
+def api_answer():
+    if not session.get("credentials"):
+        return jsonify(ok=False, error="Not signed in.", output="", log=[]), 401
+
+    data = request.get_json(silent=True) or {}
+    generation_id = (data.get("generation_id") or "").strip()
+    answer = (data.get("answer") or "").strip()
+    if not answer:
+        return jsonify(ok=False, error="Enter an answer.", output="", log=[]), 400
+
+    _cleanup_conversations()
+
+    conversation = _get_owned_conversation(generation_id)
+    if conversation is None:
+        return jsonify(ok=False, error="This draft is no longer available - generate a new one.", output="", log=[]), 404
+
+    if conversation.turns_used >= agent.MAX_FOLLOWUP_TURNS:
+        return jsonify(
+            ok=False,
+            error=f"You've used all {agent.MAX_FOLLOWUP_TURNS} follow-up rounds for this draft.",
+            output="",
+            log=[],
+        ), 400
+
+    try:
+        result = agent.continue_case_study(conversation, answer)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=f"Unexpected error: {exc}", output="", log=[]), 500
+
+    result["generation_id"] = generation_id
+    result["turns_remaining"] = max(0, agent.MAX_FOLLOWUP_TURNS - conversation.turns_used)
+    status_code = 200 if result["ok"] else 502
+    return jsonify(result), status_code
+
+
+@app.route("/api/finalize", methods=["POST"])
+def api_finalize():
+    if not session.get("credentials"):
+        return jsonify(ok=False, error="Not signed in.", output=""), 401
+
+    data = request.get_json(silent=True) or {}
+    generation_id = (data.get("generation_id") or "").strip()
+
+    _cleanup_conversations()
+
+    conversation = _get_owned_conversation(generation_id)
+    if conversation is None:
+        return jsonify(ok=False, error="This draft is no longer available - generate a new one.", output=""), 404
+
+    result = agent.finalize_case_study(conversation)
+    return jsonify(result), 200
 
 
 def main() -> None:
