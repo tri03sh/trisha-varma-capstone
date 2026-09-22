@@ -199,6 +199,13 @@ def join_sections(sections: list[dict]) -> str:
     return text.replace(SECTION_DELIMITER, "").strip()
 
 
+# Utility sections that organize the working draft (per skills/portfolio_guide.md's
+# Output Format) but aren't part of the case study itself - see merge_sections (where a
+# new section is inserted before these, not after) and finalize_case_study (which drops
+# them entirely from the finished output).
+UTILITY_SECTION_TITLES = {"missing information", "questions for the user"}
+
+
 def merge_sections(original_sections: list[dict], section_updates: dict[str, dict]) -> list[dict]:
     """Apply accumulated per-round section_updates onto original_sections: replace a
     matched section's body in place, and append any leftover updates (genuinely new
@@ -216,9 +223,8 @@ def merge_sections(original_sections: list[dict], section_updates: dict[str, dic
     if not new_sections:
         return merged
 
-    utility_titles = {"missing information", "questions for the user"}
     insert_at = next(
-        (i for i, s in enumerate(merged) if normalize_section_title(s["title"]) in utility_titles),
+        (i for i, s in enumerate(merged) if normalize_section_title(s["title"]) in UTILITY_SECTION_TITLES),
         len(merged),
     )
     return merged[:insert_at] + new_sections + merged[insert_at:]
@@ -955,9 +961,15 @@ def continue_case_study(conversation: ConversationState, user_answer: str) -> di
 
 def finalize_case_study(conversation: ConversationState) -> dict:
     """Mechanically splice every accumulated section_updates entry into
-    original_sections (see merge_sections) - no model call, pure string assembly."""
+    original_sections (see merge_sections) - no model call, pure string assembly.
+
+    Drops the utility sections (Missing Information / Questions for the User) from the
+    result: finalize produces the polished, presentable case study the user is done
+    revising, not the working draft's still-open-gaps scaffolding - any gap that was
+    never answered just stays unmentioned rather than shipping as a visible caveat."""
     merged = merge_sections(conversation.original_sections, conversation.section_updates)
-    return {"ok": True, "output": join_sections(merged), "error": ""}
+    final_sections = [s for s in merged if normalize_section_title(s["title"]) not in UTILITY_SECTION_TITLES]
+    return {"ok": True, "output": join_sections(final_sections), "error": ""}
 
 
 def main() -> None:
