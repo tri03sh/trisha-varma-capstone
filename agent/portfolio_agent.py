@@ -956,7 +956,7 @@ def continue_case_study(conversation: ConversationState, user_answer: str) -> di
         conversation.section_updates[normalize_section_title(section["title"])] = section
     conversation.turns_used += 1
 
-    return {"ok": True, "output": join_sections(sections), "error": "", "log": log}
+    return {"ok": True, "output": join_sections(sections), "sections": sections, "error": "", "log": log}
 
 
 def finalize_case_study(conversation: ConversationState) -> dict:
@@ -969,7 +969,7 @@ def finalize_case_study(conversation: ConversationState) -> dict:
     never answered just stays unmentioned rather than shipping as a visible caveat."""
     merged = merge_sections(conversation.original_sections, conversation.section_updates)
     final_sections = [s for s in merged if normalize_section_title(s["title"]) not in UTILITY_SECTION_TITLES]
-    return {"ok": True, "output": join_sections(final_sections), "error": ""}
+    return {"ok": True, "output": join_sections(final_sections), "sections": final_sections, "error": ""}
 
 
 def main() -> None:

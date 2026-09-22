@@ -153,6 +153,17 @@ PAGE = """<!doctype html>
     font-size: 1.3rem;
     margin-bottom: 14px;
   }
+  .section-title {
+    font-weight: 700;
+    font-size: 1.15rem;
+    margin: 0 0 8px;
+  }
+  .section-title:not(:first-child) { margin-top: 24px; }
+  .section-body {
+    font-weight: 400;
+    font-size: 1rem;
+    white-space: pre-wrap;
+  }
   #revise-section { margin-top: 16px; }
   #revise-section.hidden { display: none; }
   textarea {
@@ -274,24 +285,62 @@ PAGE = """<!doctype html>
     // "[Suggested image: ...]" placeholder gets its "Suggested image:" label bolded.
     // Every other character, including the placeholder's own description, still goes
     // through createTextNode/textContent.
-    function renderOutputText(container, text) {
-      container.innerHTML = "";
+    // Appends `text` to `parent` as plain text nodes (never innerHTML - this is model
+    // output, so it's never trusted as markup), except that a "[Suggested image: ...]"
+    // placeholder gets its "Suggested image:" label bolded. Every other character,
+    // including the placeholder's own description, still goes through createTextNode.
+    function appendInlineText(parent, text) {
       const pattern = /\\[Suggested image:([^\\]]*)\\]/g;
       let lastIndex = 0;
       let match;
       while ((match = pattern.exec(text)) !== null) {
         if (match.index > lastIndex) {
-          container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+          parent.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
         }
-        container.appendChild(document.createTextNode("["));
+        parent.appendChild(document.createTextNode("["));
         const label = document.createElement("strong");
         label.textContent = "Suggested image:";
-        container.appendChild(label);
-        container.appendChild(document.createTextNode(match[1] + "]"));
+        parent.appendChild(label);
+        parent.appendChild(document.createTextNode(match[1] + "]"));
         lastIndex = pattern.lastIndex;
       }
       if (lastIndex < text.length) {
-        container.appendChild(document.createTextNode(text.slice(lastIndex)));
+        parent.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+    }
+
+    // Fallback for when structured `sections` aren't available - renders `text` as one
+    // flat block (still with "Suggested image:" bolded via appendInlineText).
+    function renderOutputText(container, text) {
+      container.innerHTML = "";
+      appendInlineText(container, text);
+    }
+
+    // Preferred rendering: one bold, slightly-larger heading per section title, its body
+    // in normal text below, with consistent spacing between sections (see .section-title
+    // /.section-body CSS) - used for the initial draft, each revision round's returned
+    // section(s), and the finalized case study alike.
+    function renderSections(container, sections) {
+      container.innerHTML = "";
+      for (const section of sections) {
+        const heading = document.createElement("div");
+        heading.className = "section-title";
+        heading.textContent = section.title;
+        container.appendChild(heading);
+
+        const body = document.createElement("div");
+        body.className = "section-body";
+        appendInlineText(body, section.body);
+        container.appendChild(body);
+      }
+    }
+
+    // Renders `sections` if present and non-empty, else falls back to the flat `text`.
+    function renderDraft(container, sections, text) {
+      if (sections && sections.length) {
+        renderSections(container, sections);
+      } else {
+        renderOutputText(container, text);
       }
     }
 
@@ -348,7 +397,7 @@ PAGE = """<!doctype html>
             resultEl.appendChild(notice);
           }
           const body = document.createElement("div");
-          renderOutputText(body, data.output);
+          renderDraft(body, data.sections, data.output);
           resultEl.appendChild(body);
           resultEl.classList.add("visible");
 
@@ -401,7 +450,7 @@ PAGE = """<!doctype html>
           label.className = "revision-label";
           label.textContent = "Update";
           const body = document.createElement("div");
-          renderOutputText(body, data.output);
+          renderDraft(body, data.sections, data.output);
           item.appendChild(label);
           item.appendChild(body);
           revisionsEl.appendChild(item);
@@ -445,7 +494,7 @@ PAGE = """<!doctype html>
           label.className = "final-label";
           label.textContent = "Final Case Study";
           const body = document.createElement("div");
-          renderOutputText(body, data.output);
+          renderDraft(body, data.sections, data.output);
           finalResultEl.appendChild(label);
           finalResultEl.appendChild(body);
           finalResultEl.classList.add("visible");
@@ -540,7 +589,8 @@ def api_generate():
         session.permanent = True
         session["generation_ids"] = session.get("generation_ids", []) + [generation_id]
         result = {**result, "generation_id": generation_id, "turns_remaining": agent.MAX_FOLLOWUP_TURNS}
-    result.pop("sections", None)
+    # "sections" (list of {title, body}) is kept in the response so the web UI can render
+    # real headings per section instead of one flattened string - see renderSections.
 
     status_code = 200 if result["ok"] else 502
     return jsonify(result), status_code
