@@ -67,21 +67,32 @@ MAX_GENERATION_WALL_CLOCK_S = 240.0
 # MAX_FILE_CHARS/MAX_TOTAL_TEXT_CHARS are sized against this account's
 # measured tokens-per-minute (ITPM) limit on MODEL - 8000 for
 # openai/gpt-oss-120b, measured directly via response headers
-# (x-ratelimit-limit-tokens). The system prompt + tool schema alone cost
-# ~4500 tokens as of the last measurement (via response.usage.prompt_tokens
-# - it keeps growing as skills/*.md gain guidance, so re-measure whenever
-# they change), leaving ~3500 tokens of headroom; these caps target well
-# under that (~2250 tokens of text, ~9000 chars) to leave real margin for
-# tool-call round trips within the same rolling minute. There's no fallback
-# left for an oversized request (that was removed with the Visual Curator) -
-# a 413 here is a hard failure, so keep shrinking these caps as the system
-# prompt grows rather than let the margin erode to nothing. Re-measure both
-# numbers if MODEL ever changes - ITPM limits are set per-model, not
-# account-wide.
+# (x-ratelimit-limit-tokens). The system prompt + tool schema + all fixed
+# per-request instruction text (context_text's formatting/headline reminders)
+# together cost 4831 tokens as of the last real measurement (via
+# response.usage.prompt_tokens on a zero-content request - it keeps growing
+# as skills/*.md or context_text's own fixed text grows, so re-measure
+# whenever either changes), leaving ~3169 tokens of headroom.
+#
+# A prior version of this comment assumed retrieved text costs ~4 chars/token
+# and sized these caps at 9000 chars (~2250 tokens) accordingly - that
+# produced a real 413 in production (8829 tokens requested against the 8000
+# limit) because real project content from Drive tokenizes far less
+# efficiently than that (this account's actual ratio measured closer to ~2.3
+# chars/token on the failing request). These caps now target a real token
+# budget directly (~2000 tokens for content, ~4500 chars at a conservative
+# ~2.5 chars/token) rather than trusting a chars-per-token assumption, and
+# leave real margin (~1200 tokens) for tool-call round trips within the same
+# rolling minute plus normal request-to-request variance in the fixed
+# overhead above. There's no fallback left for an oversized request (that was
+# removed with the Visual Curator) - a 413 here is a hard failure, so
+# re-measure and shrink further if the fixed overhead grows again rather than
+# let the margin erode to nothing. Re-measure both numbers if MODEL ever
+# changes - ITPM limits are set per-model, not account-wide.
 MAX_PREFETCH_FILES = 40
 MAX_PREFETCH_DEPTH = 6
-MAX_FILE_CHARS = 9000
-MAX_TOTAL_TEXT_CHARS = 9000
+MAX_FILE_CHARS = 4500
+MAX_TOTAL_TEXT_CHARS = 4500
 
 # Below this many total retrieved words, a folder is deterministically
 # treated as too sparse for any Case Study Draft section (the "relevant but
