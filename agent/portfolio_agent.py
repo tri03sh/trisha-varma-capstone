@@ -14,6 +14,7 @@ is kept explicitly as a `messages` list threaded through each turn, rather
 than a server-side interaction id.
 """
 
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import docx
 import groq
 from dotenv import load_dotenv
 from groq import Groq
@@ -199,11 +201,78 @@ def join_sections(sections: list[dict]) -> str:
     return text.replace(SECTION_DELIMITER, "").strip()
 
 
+# Matches the same "[Suggested image: ...]" marker agent/web.py's appendInlineText
+# renders as a placeholder box in the browser (see PAGE's <script> block) - this is
+# the server-side equivalent for the Google Docs export, which builds a document from
+# raw section text rather than the browser's rendered DOM.
+IMAGE_PLACEHOLDER_RE = re.compile(r"\[Suggested image:([^\]]*)\]")
+
+
+def build_case_study_docx(folder_name: str, sections: list[dict]) -> bytes:
+    """Build a .docx (as bytes) from finalized case-study `sections`, for
+    drive_client.upload_docx_as_google_doc to upload - Drive auto-converts an
+    uploaded .docx into a native Google Doc, and Word's built-in Heading styles
+    map directly onto Google Docs' heading styles on that conversion, so a
+    top-level title (level 0) plus one level-1 heading per section is enough
+    for Drive to produce a properly outlined Doc, not a wall of plain text.
+
+    A "[Suggested image: ...]" marker embedded in a section body (see
+    IMAGE_PLACEHOLDER_RE) has no separate field in the section data model, so
+    it's rendered here as its own italicized paragraph ("Suggested image:
+    ...") rather than left as a literal bracketed string in the exported Doc -
+    unlike the PDF export (agent/web.py's @media print rules), which hides
+    these placeholders entirely, this export stays an editable working copy,
+    so the placeholder is kept as a visible reminder of what's left to add.
+    """
+    document = docx.Document()
+    document.add_heading(folder_name or "Case Study", level=0)
+
+    for section in sections:
+        document.add_heading(section.get("title", ""), level=1)
+        body = section.get("body", "")
+        last_index = 0
+        for match in IMAGE_PLACEHOLDER_RE.finditer(body):
+            before = body[last_index:match.start()].strip()
+            if before:
+                document.add_paragraph(before)
+            caption = match.group(1).strip()
+            run = document.add_paragraph().add_run(f"Suggested image: {caption}" if caption else "Suggested image")
+            run.italic = True
+            last_index = match.end()
+        remainder = body[last_index:].strip()
+        if remainder:
+            document.add_paragraph(remainder)
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
 # Utility sections that organize the working draft (per skills/portfolio_guide.md's
 # Output Format) but aren't part of the case study itself - see merge_sections (where a
 # new section is inserted before these, not after) and finalize_case_study (which drops
 # them entirely from the finished output).
 UTILITY_SECTION_TITLES = {"missing information", "questions for the user"}
+
+# The exact thematic-skeleton names from skills/portfolio_guide.md's Case Study
+# Structure list - printing one of these verbatim as a section title violates that
+# skill's explicit "never print the generic label itself" rule (a project-specific
+# narrative headline is required instead). Relying on the model to always comply is
+# what made content_is_sparse's insufficiency judgment deterministic below (see its
+# comment) - this is the same fix applied to headline style: measure it in Python
+# and correct it if it slips through, rather than trusting compliance alone. Keep
+# this set in sync with portfolio_guide.md if that list ever changes.
+GENERIC_SECTION_TITLES = {
+    "overview",
+    "context",
+    "users",
+    "research and insights",
+    "design goals",
+    "process and iterations",
+    "key design decisions",
+    "final solution",
+    "outcome and reflection",
+}
 
 
 def merge_sections(original_sections: list[dict], section_updates: dict[str, dict]) -> list[dict]:
@@ -686,6 +755,79 @@ def run_turn(client: Groq, messages: list, user_input: str) -> None:
         print("\n[No text response]\n")
 
 
+def _detect_generic_titles(sections: list[dict]) -> list[int]:
+    """Indices of `sections` whose title is exactly one of GENERIC_SECTION_TITLES
+    (case/whitespace-insensitive) rather than a project-specific narrative headline."""
+    return [i for i, s in enumerate(sections) if normalize_section_title(s["title"]) in GENERIC_SECTION_TITLES]
+
+
+def _fix_generic_section_titles(
+    client: Groq, system_prompt: str, sections: list[dict], log: list, deadline: float | None
+) -> list[dict]:
+    """Deterministic backstop for skills/portfolio_guide.md's narrative-headline
+    requirement (see GENERIC_SECTION_TITLES): the system prompt states the rule once,
+    but the model doesn't always comply with it. One bounded, targeted retry asks the
+    model for corrected titles only, given each offending section's own body text as
+    context - the body itself is never sent back or touched, so there's no risk of the
+    retry drifting the draft's actual content, only its titles. Built as a fresh,
+    standalone exchange (system prompt + one user message) rather than threading the
+    original conversation forward, matching continue_case_study's approach below.
+    Never raises and never loses the draft - any failure here just leaves the original
+    (generic) titles in place.
+    """
+    generic_indices = _detect_generic_titles(sections)
+    if not generic_indices:
+        return sections
+    if deadline is not None and time.monotonic() >= deadline:
+        log.append("Skipped the generic-title fix-up - out of time budget for this generation.")
+        return sections
+
+    log.append(
+        f"{len(generic_indices)} section title(s) came back as the generic category label "
+        "instead of a narrative headline - asking the agent to rename them."
+    )
+
+    sections_block = "\n\n".join(
+        f"Section {n + 1} title: {sections[i]['title']}\nSection {n + 1} body: {sections[i]['body']}"
+        for n, i in enumerate(generic_indices)
+    )
+    retry_prompt = (
+        f"The title(s) below for {len(generic_indices)} section(s) of a case study are the "
+        "plain category label, not a narrative headline - that violates the case study's "
+        "title style requirement. For each section, write a specific, story-shaped "
+        "narrative headline drawn from its own body text - never repeat the generic "
+        f"category label. Reply with exactly {len(generic_indices)} line(s), one corrected "
+        "title per line, in the same order as below, and nothing else - no numbering, no "
+        f"body text, no blank lines, no explanation.\n\n{sections_block}"
+    )
+    retry_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": retry_prompt},
+    ]
+
+    try:
+        response = create_completion(client, log=log, model=MODEL, messages=retry_messages)
+    except Exception:  # noqa: BLE001 - best-effort backstop, never fail the whole draft over this
+        log.append("Title-fix retry failed - keeping the original titles.")
+        return sections
+
+    raw_retry = (response.choices[0].message.content or "").strip()
+    new_titles = [line.strip() for line in raw_retry.splitlines() if line.strip()]
+    if len(new_titles) != len(generic_indices):
+        log.append("Title-fix retry returned an unexpected number of lines - keeping the original titles.")
+        return sections
+
+    corrected = list(sections)
+    for idx, new_title in zip(generic_indices, new_titles):
+        new_title = strip_markdown(new_title)
+        if not new_title or normalize_section_title(new_title) in GENERIC_SECTION_TITLES:
+            # Retry still produced a generic (or empty) label - leave this one section
+            # as-is rather than retrying again (bounded to a single attempt).
+            continue
+        corrected[idx] = {**corrected[idx], "title": new_title}
+    return corrected
+
+
 def generate_case_study(folder_name: str) -> dict:
     """Locate a Drive folder by name and run the agent to draft a case study
     from its contents. Used by the web UI (agent/web.py) - single-shot, no
@@ -801,7 +943,12 @@ def generate_case_study(folder_name: str) -> dict:
             "if this isn't enough usable content for some other reason, say so plainly "
             "instead of searching elsewhere in Drive. The search_drive/list_folder/read_file "
             "tools are available if you need to double-check something, but are confined to "
-            "this folder and its subfolders."
+            "this folder and its subfolders.\n\n"
+            "Headline reminder: for every narrative section (not Missing Information or "
+            "Questions for the User), the printed title must be a specific, story-shaped "
+            "narrative headline drawn from this project's own content - never the generic "
+            "category label itself (e.g. write something like 'How We Got Here', not "
+            "'Process and Iterations'; 'What Our Users Said', not 'Users')."
         )
 
     context_text += (
@@ -844,6 +991,10 @@ def generate_case_study(folder_name: str) -> dict:
     for section in sections:
         section["title"] = strip_markdown(section["title"])
         section["body"] = strip_markdown(section["body"])
+
+    if not insufficient and sections:
+        sections = _fix_generic_section_titles(client, system_prompt, sections, log, deadline)
+
     output = join_sections(sections)
 
     if content_is_sparse and not insufficient:

@@ -20,6 +20,7 @@ import uuid
 from datetime import timedelta
 
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+from googleapiclient.errors import HttpError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import drive_client
@@ -230,6 +231,16 @@ PAGE = """<!doctype html>
     font-size: 1.1rem;
     margin-bottom: 16px;
   }
+  .final-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  #export-doc-status {
+    font-size: 0.9rem;
+    color: #555;
+    margin: -8px 0 16px;
+  }
   /* "Paper" for the finalized case study only. Background/text color are fixed
      regardless of OS/browser color scheme (:root declares "color-scheme: light
      dark" above) so the page stays a white page even when the surrounding app
@@ -270,6 +281,55 @@ PAGE = """<!doctype html>
       margin-left: 0;
       margin-right: 0;
       padding: 28px 20px;
+    }
+  }
+  @media print {
+    body * {
+      visibility: hidden;
+    }
+    #final-result,
+    #final-result .document-page,
+    #final-result .document-page * {
+      visibility: visible;
+    }
+    /* Suggested-image placeholders are a working aid for the in-app view (where
+       images haven't been added yet), not something that belongs in a finished,
+       downloaded document - hide them entirely in the PDF rather than printing
+       an empty dashed box. The Google Docs export keeps them (see
+       build_case_study_docx) since that's still an editable working copy. */
+    #final-result .image-placeholder {
+      display: none;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      max-width: none;
+    }
+    #final-result {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      margin: 0;
+    }
+    /* The screen version breaks .document-page out of the app's narrow 720px
+       column via position:relative + negative margins (see the un-prefixed
+       rule above) - print has no such column to escape, and that trick could
+       clip or misalign the page under print layout, so reset it to a plain
+       static, full-width block instead. */
+    #final-result .document-page {
+      position: static;
+      left: auto;
+      right: auto;
+      margin: 0;
+      width: auto;
+      max-width: none;
+      padding: 0;
+      border: none;
+      box-shadow: none;
+    }
+    @page {
+      margin: 0.75in;
     }
   }
 </style>
@@ -564,6 +624,26 @@ PAGE = """<!doctype html>
           label.textContent = "Final Case Study";
           finalResultEl.appendChild(label);
 
+          const actions = document.createElement("div");
+          actions.className = "final-actions";
+
+          const pdfBtn = document.createElement("button");
+          pdfBtn.type = "button";
+          pdfBtn.textContent = "Download as PDF";
+          pdfBtn.addEventListener("click", () => window.print());
+          actions.appendChild(pdfBtn);
+
+          const exportBtn = document.createElement("button");
+          exportBtn.type = "button";
+          exportBtn.textContent = "Export to Google Docs";
+          const exportStatus = document.createElement("div");
+          exportStatus.id = "export-doc-status";
+          exportBtn.addEventListener("click", () => exportToGoogleDocs(exportBtn, exportStatus));
+          actions.appendChild(exportBtn);
+
+          finalResultEl.appendChild(actions);
+          finalResultEl.appendChild(exportStatus);
+
           const page = document.createElement("div");
           page.className = "document-page";
           const body = document.createElement("div");
@@ -581,6 +661,45 @@ PAGE = """<!doctype html>
         finalizeBtn.disabled = false;
       }
     });
+
+    async function exportToGoogleDocs(button, statusEl) {
+      if (!generationId) return;
+
+      button.disabled = true;
+      statusEl.textContent = "Creating your Google Doc...";
+
+      try {
+        const response = await fetch("/api/export_doc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generation_id: generationId }),
+        });
+
+        if (response.status === 401) {
+          window.location.href = "/auth/login";
+          return;
+        }
+
+        const data = await response.json();
+
+        if (data.ok) {
+          statusEl.innerHTML = "";
+          const link = document.createElement("a");
+          link.href = data.url;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = "Open your Google Doc";
+          statusEl.appendChild(link);
+          window.open(data.url, "_blank", "noopener");
+        } else {
+          statusEl.textContent = data.error || "Something went wrong creating the Google Doc.";
+        }
+      } catch (err) {
+        statusEl.textContent = "Request failed - the connection was lost. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    }
   </script>
 </body>
 </html>
@@ -732,6 +851,42 @@ def api_finalize():
 
     result = agent.finalize_case_study(conversation)
     return jsonify(result), 200
+
+
+@app.route("/api/export_doc", methods=["POST"])
+def api_export_doc():
+    if not session.get("credentials"):
+        return jsonify(ok=False, error="Not signed in.", url=""), 401
+
+    data = request.get_json(silent=True) or {}
+    generation_id = (data.get("generation_id") or "").strip()
+
+    _cleanup_conversations()
+
+    conversation = _get_owned_conversation(generation_id)
+    if conversation is None:
+        return jsonify(ok=False, error="This draft is no longer available - generate a new one.", url=""), 404
+
+    final = agent.finalize_case_study(conversation)
+    docx_bytes = agent.build_case_study_docx(conversation.folder_name, final["sections"])
+    doc_name = f"{conversation.folder_name} - Case Study"
+
+    try:
+        created = drive_client.upload_docx_as_google_doc(doc_name, docx_bytes)
+    except HttpError as exc:
+        if exc.resp.status == 403 and "insufficient" in (exc.reason or "").lower():
+            return jsonify(
+                ok=False,
+                error="Your Google sign-in doesn't have permission to create files yet. Sign out and sign back in, then try again.",
+                reauth_required=True,
+                url="",
+            ), 403
+        return jsonify(ok=False, error=f"Google Drive error: {exc.reason or exc}", url=""), 502
+    except Exception as exc:  # noqa: BLE001 - last-resort guard, matches other routes
+        return jsonify(ok=False, error=f"Unexpected error: {exc}", url=""), 500
+
+    url = created.get("webViewLink") or f"https://docs.google.com/document/d/{created.get('id')}/edit"
+    return jsonify(ok=True, url=url, error=""), 200
 
 
 def main() -> None:
