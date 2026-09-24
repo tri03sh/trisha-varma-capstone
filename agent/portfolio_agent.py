@@ -772,8 +772,25 @@ def _detect_generic_titles(sections: list[dict]) -> list[int]:
     return [i for i, s in enumerate(sections) if normalize_section_title(s["title"]) in GENERIC_SECTION_TITLES]
 
 
+# Deliberately NOT the full build_system_prompt() output - this retry only needs the
+# narrative-headline rule, not the entire agent role/workflow/skills bundle (~4800
+# tokens). Reusing the full system prompt here was the original implementation and
+# caused real, observed failures: the retry runs immediately after the main generation
+# call, so two back-to-back ~4800-token-overhead requests within the same rolling
+# 60s window can together exceed this account's 8000 ITPM limit even when neither
+# request alone would (see [[groq_token_budget]] memory / the 2026-09-24 413 fix) -
+# the retry would then silently fail and fall back to the generic title. A minimal,
+# purpose-built system message keeps this call's fixed cost to a few dozen tokens.
+_TITLE_FIX_SYSTEM_PROMPT = (
+    "You rewrite case study section titles. A title that is a plain category label "
+    "(e.g. \"Process and Iterations\", \"Users\") must become a specific, story-shaped "
+    "narrative headline drawn from that section's own body text - never the generic "
+    "category label itself."
+)
+
+
 def _fix_generic_section_titles(
-    client: Groq, system_prompt: str, sections: list[dict], log: list, deadline: float | None
+    client: Groq, sections: list[dict], log: list, deadline: float | None
 ) -> list[dict]:
     """Deterministic backstop for skills/portfolio_guide.md's narrative-headline
     requirement (see GENERIC_SECTION_TITLES): the system prompt states the rule once,
@@ -781,10 +798,9 @@ def _fix_generic_section_titles(
     model for corrected titles only, given each offending section's own body text as
     context - the body itself is never sent back or touched, so there's no risk of the
     retry drifting the draft's actual content, only its titles. Built as a fresh,
-    standalone exchange (system prompt + one user message) rather than threading the
-    original conversation forward, matching continue_case_study's approach below.
-    Never raises and never loses the draft - any failure here just leaves the original
-    (generic) titles in place.
+    minimal exchange (see _TITLE_FIX_SYSTEM_PROMPT) rather than threading the original
+    conversation or its full system prompt forward. Never raises and never loses the
+    draft - any failure here just leaves the original (generic) titles in place.
     """
     generic_indices = _detect_generic_titles(sections)
     if not generic_indices:
@@ -812,14 +828,14 @@ def _fix_generic_section_titles(
         f"body text, no blank lines, no explanation.\n\n{sections_block}"
     )
     retry_messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _TITLE_FIX_SYSTEM_PROMPT},
         {"role": "user", "content": retry_prompt},
     ]
 
     try:
         response = create_completion(client, log=log, model=MODEL, messages=retry_messages)
-    except Exception:  # noqa: BLE001 - best-effort backstop, never fail the whole draft over this
-        log.append("Title-fix retry failed - keeping the original titles.")
+    except Exception as exc:  # noqa: BLE001 - best-effort backstop, never fail the whole draft over this
+        log.append(f"Title-fix retry failed ({exc}) - keeping the original titles.")
         return sections
 
     raw_retry = (response.choices[0].message.content or "").strip()
@@ -1004,7 +1020,7 @@ def generate_case_study(folder_name: str) -> dict:
         section["body"] = strip_markdown(section["body"])
 
     if not insufficient and sections:
-        sections = _fix_generic_section_titles(client, system_prompt, sections, log, deadline)
+        sections = _fix_generic_section_titles(client, sections, log, deadline)
 
     output = join_sections(sections)
 
