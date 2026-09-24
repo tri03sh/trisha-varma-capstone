@@ -285,6 +285,31 @@ GENERIC_SECTION_TITLES = {
     "outcome and reflection",
 }
 
+# Catches a softer version of the same violation: the generic label used as a
+# prefix rather than the whole title (e.g. "Overview: Turning Passive Match
+# Watching into Active Learning") - still prints the generic label verbatim,
+# just glued to a real headline instead of standing alone. `_detect_generic_titles`
+# only catches an exact match, so this needs its own check.
+_GENERIC_TITLE_PREFIX_RE = re.compile(
+    r"^(" + "|".join(re.escape(t) for t in GENERIC_SECTION_TITLES) + r")\s*[:\-–—]\s*(?=\S)",
+    re.IGNORECASE,
+)
+
+
+def _strip_generic_title_prefix(title: str) -> str:
+    """Deterministically strips a leading "<generic label><separator>" prefix
+    from `title` (see _GENERIC_TITLE_PREFIX_RE) - the remainder is already a
+    real narrative headline the model wrote, so no model call is needed here,
+    unlike the exact-match case _fix_generic_section_titles handles. Runs
+    before that exact-match check in generate_case_study, so a remainder that
+    happens to itself be exactly a generic label (e.g. "Overview: Context")
+    still gets caught and fixed there. Returns `title` unchanged if no such
+    prefix is present."""
+    match = _GENERIC_TITLE_PREFIX_RE.match(title)
+    if not match:
+        return title
+    return title[match.end():].strip()
+
 
 def merge_sections(original_sections: list[dict], section_updates: dict[str, dict]) -> list[dict]:
     """Apply accumulated per-round section_updates onto original_sections: replace a
@@ -1044,6 +1069,7 @@ def generate_case_study(folder_name: str) -> dict:
         for section in sections:
             section["title"] = strip_markdown(section["title"])
             section["body"] = strip_markdown(section["body"])
+            section["title"] = _strip_generic_title_prefix(section["title"])
 
         if insufficient or not _narrative_sections_look_degenerate(sections):
             break
@@ -1165,6 +1191,7 @@ def continue_case_study(conversation: ConversationState, user_answer: str) -> di
     for section in sections:
         section["title"] = strip_markdown(section["title"])
         section["body"] = strip_markdown(section["body"])
+        section["title"] = _strip_generic_title_prefix(section["title"])
 
     if not sections:
         return {"ok": False, "output": "", "error": "The agent produced no response.", "log": log}
