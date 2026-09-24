@@ -222,17 +222,55 @@ PAGE = """<!doctype html>
   #finalize-btn.hidden { display: none; }
   #final-result {
     display: none;
-    white-space: pre-wrap;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    padding: 20px;
     margin-top: 16px;
   }
   #final-result.visible { display: block; }
   .final-label {
     font-weight: 700;
     font-size: 1.1rem;
-    margin-bottom: 12px;
+    margin-bottom: 16px;
+  }
+  /* "Paper" for the finalized case study only. Background/text color are fixed
+     regardless of OS/browser color scheme (:root declares "color-scheme: light
+     dark" above) so the page stays a white page even when the surrounding app
+     chrome renders in dark mode - same reasoning as .image-placeholder above,
+     applied to the whole final container instead of just the image boxes. */
+  #final-result .document-page {
+    background: #ffffff;
+    color: #1a1a1a;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    box-sizing: border-box;
+    border: 1px solid #e2e2e2;
+    border-radius: 3px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 6px 20px rgba(0, 0, 0, 0.08);
+    padding: 56px 64px;
+    width: 816px; /* ~8.5in @ 96dpi - Google Docs/letter-page width */
+    max-width: calc(100vw - 40px);
+    position: relative;
+    left: 50%;
+    right: 50%;
+    margin-left: -408px; /* half of 816px, centers the fixed width on the viewport */
+    margin-right: -408px;
+  }
+  /* Section headings read as document headings inside the page: a touch more
+     top spacing, and a hairline rule to separate them. */
+  #final-result .document-page .section-title {
+    padding-bottom: 6px;
+    border-bottom: 1px solid #ececec;
+  }
+  #final-result .document-page .section-title:not(:first-child) {
+    margin-top: 32px;
+  }
+  @media (max-width: 900px) {
+    #final-result .document-page {
+      width: calc(100vw - 40px);
+      left: 0;
+      right: 0;
+      margin-left: 0;
+      margin-right: 0;
+      padding: 28px 20px;
+    }
   }
 </style>
 </head>
@@ -524,10 +562,15 @@ PAGE = """<!doctype html>
           const label = document.createElement("div");
           label.className = "final-label";
           label.textContent = "Final Case Study";
+          finalResultEl.appendChild(label);
+
+          const page = document.createElement("div");
+          page.className = "document-page";
           const body = document.createElement("div");
           renderDraft(body, data.sections, data.output);
-          finalResultEl.appendChild(label);
-          finalResultEl.appendChild(body);
+          page.appendChild(body);
+          finalResultEl.appendChild(page);
+
           finalResultEl.classList.add("visible");
         } else {
           showError(data.error || "Something went wrong.");
