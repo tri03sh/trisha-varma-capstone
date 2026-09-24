@@ -766,6 +766,22 @@ def run_turn(client: Groq, messages: list, user_input: str) -> None:
         print("\n[No text response]\n")
 
 
+def _narrative_sections_look_degenerate(sections: list[dict]) -> bool:
+    """True if the narrative (non-utility) sections came back as titles with
+    essentially no body prose under them - a rare but real, observed failure
+    mode: every section title present and well-formed, Missing Information/
+    Questions for the User completed normally, but every narrative section's
+    body is empty or a handful of words, as if only the outline got written.
+    A deterministic backstop (like content_is_sparse/GENERIC_SECTION_TITLES
+    elsewhere in this file) rather than trusting every generation to have
+    real content - see generate_case_study's retry loop."""
+    narrative = [s for s in sections if normalize_section_title(s["title"]) not in UTILITY_SECTION_TITLES]
+    if not narrative:
+        return False
+    thin = sum(1 for s in narrative if len(s["body"].split()) < 15)
+    return thin >= max(1, len(narrative) - 1)
+
+
 def _detect_generic_titles(sections: list[dict]) -> list[int]:
     """Indices of `sections` whose title is exactly one of GENERIC_SECTION_TITLES
     (case/whitespace-insensitive) rather than a project-specific narrative headline."""
@@ -987,37 +1003,60 @@ def generate_case_study(folder_name: str) -> dict:
         f"section titles, content, or style requirements above."
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": context_text},
-    ]
+    MAX_GENERATION_ATTEMPTS = 2
+    raw_output = ""
+    insufficient = False
+    sections: list[dict] = []
+    tool_errors: list = []
 
-    try:
-        raw_output, tool_errors = resolve_tool_calls(client, messages, log, scope=scope, deadline=deadline)
-    except TimeoutError as exc:
-        return {"ok": False, "output": "", "error": str(exc), "log": log}
-    except RateLimitTooLong as exc:
-        return {"ok": False, "output": "", "error": str(exc), "log": log}
-    except groq.RateLimitError:
-        return {
-            "ok": False,
-            "output": "",
-            "error": "Groq's rate limit was hit repeatedly and retries were exhausted. Wait a minute and try again.",
-            "log": log,
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "output": "", "error": f"Case study generation failed: {exc}", "log": log}
+    for attempt in range(MAX_GENERATION_ATTEMPTS):
+        # A fresh exchange each attempt (not the previous attempt's mutated
+        # messages/tool-call trace) - cheaper, and avoids carrying a failed
+        # attempt's noise into the retry, matching continue_case_study's
+        # "build fresh each time" approach elsewhere in this file.
+        attempt_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": context_text},
+        ]
+        try:
+            raw_output, tool_errors = resolve_tool_calls(client, attempt_messages, log, scope=scope, deadline=deadline)
+        except TimeoutError as exc:
+            return {"ok": False, "output": "", "error": str(exc), "log": log}
+        except RateLimitTooLong as exc:
+            return {"ok": False, "output": "", "error": str(exc), "log": log}
+        except groq.RateLimitError:
+            return {
+                "ok": False,
+                "output": "",
+                "error": "Groq's rate limit was hit repeatedly and retries were exhausted. Wait a minute and try again.",
+                "log": log,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "output": "", "error": f"Case study generation failed: {exc}", "log": log}
 
-    raw_output, insufficient = extract_insufficient_info_marker(raw_output or "")
+        raw_output, insufficient = extract_insufficient_info_marker(raw_output or "")
 
-    # Parse into sections before strip_markdown - see SECTION_DELIMITER's docstring for
-    # why the delimiter has to survive that step. Each section's title/body is then
-    # stripped individually so the reconstructed `output` below still reads the same as
-    # before this parsing was added.
-    sections = parse_sections(raw_output) if raw_output else []
-    for section in sections:
-        section["title"] = strip_markdown(section["title"])
-        section["body"] = strip_markdown(section["body"])
+        # Parse into sections before strip_markdown - see SECTION_DELIMITER's docstring
+        # for why the delimiter has to survive that step. Each section's title/body is
+        # then stripped individually so the reconstructed `output` below still reads
+        # the same as before this parsing was added.
+        sections = parse_sections(raw_output) if raw_output else []
+        for section in sections:
+            section["title"] = strip_markdown(section["title"])
+            section["body"] = strip_markdown(section["body"])
+
+        if insufficient or not _narrative_sections_look_degenerate(sections):
+            break
+
+        # Deterministic backstop (see _narrative_sections_look_degenerate) for a rare,
+        # real, observed failure mode: a title-only response with no body prose under
+        # any narrative section. One bounded retry - a full regeneration, not a patch,
+        # since this is model stochasticity with no existing prose to build on.
+        if attempt + 1 < MAX_GENERATION_ATTEMPTS:
+            if deadline is not None and time.monotonic() >= deadline:
+                log.append("Sections came back as titles with no body text, but there's no time budget left to retry.")
+                break
+            log.append("Sections came back as titles with no body text - retrying the generation once.")
 
     if not insufficient and sections:
         sections = _fix_generic_section_titles(client, sections, log, deadline)
