@@ -48,18 +48,20 @@ app.secret_key = SECRET_KEY
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 
 # In-memory store of follow-up revision conversations (see agent.ConversationState),
-# keyed by an opaque generation id handed to the browser. Fine for the current
-# single-worker gunicorn deployment (Procfile has no --workers flag); would need to move
-# to Redis/a DB if this app is ever scaled to multiple workers/processes, since each
-# worker would otherwise have its own disjoint copy of this dict.
+# keyed by an opaque generation id handed to the browser. Only correct with exactly one
+# gunicorn worker process (Procfile pins --workers 1, using threads for concurrency, for this reason - previously had 2, which
+# caused real, observed "This draft is no longer available" failures: a later request
+# for the same generation_id landing on the other worker process has no idea it exists,
+# since each worker has its own disjoint copy of this dict). If this app is ever scaled
+# to multiple workers/processes/instances again, this needs to move to Redis/a DB first.
 CONVERSATIONS: dict[str, agent.ConversationState] = {}
 
 
 def _cleanup_conversations() -> None:
-    """Purge conversations older than CONVERSATION_TTL_S so an abandoned session doesn't
+    """Purge conversations unused for CONVERSATION_TTL_S so an abandoned session doesn't
     grow this store forever on a long-lived worker."""
     cutoff = time.monotonic() - agent.CONVERSATION_TTL_S
-    expired = [gid for gid, conv in CONVERSATIONS.items() if conv.created_at < cutoff]
+    expired = [gid for gid, conv in list(CONVERSATIONS.items()) if conv.last_used_at < cutoff]
     for gid in expired:
         CONVERSATIONS.pop(gid, None)
 
@@ -780,7 +782,11 @@ def api_generate():
             original_sections=result["sections"],
         )
         session.permanent = True
-        session["generation_ids"] = session.get("generation_ids", []) + [generation_id]
+        # Keep only ids still in the store: this list lives in the signed session cookie
+        # alongside the OAuth credentials, and left to grow it eventually passes the
+        # browser's ~4KB cookie limit, after which the browser silently stops saving it.
+        live_ids = [gid for gid in session.get("generation_ids", []) if gid in CONVERSATIONS]
+        session["generation_ids"] = live_ids + [generation_id]
         result = {**result, "generation_id": generation_id, "turns_remaining": agent.MAX_FOLLOWUP_TURNS}
     # "sections" (list of {title, body}) is kept in the response so the web UI can render
     # real headings per section instead of one flattened string - see renderSections.
@@ -796,7 +802,10 @@ def _get_owned_conversation(generation_id: str) -> agent.ConversationState | Non
     unguessable."""
     if not generation_id or generation_id not in session.get("generation_ids", []):
         return None
-    return CONVERSATIONS.get(generation_id)
+    conversation = CONVERSATIONS.get(generation_id)
+    if conversation is not None:
+        conversation.last_used_at = time.monotonic()
+    return conversation
 
 
 @app.route("/api/answer", methods=["POST"])

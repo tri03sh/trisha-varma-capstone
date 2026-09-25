@@ -113,7 +113,8 @@ MIN_CONTENT_WORDS_FOR_DRAFT = 300
 MAX_FOLLOWUP_TURNS = 3
 
 # How long a ConversationState (see below) is kept in the web layer's in-memory store
-# before being purged, so an abandoned session doesn't grow that store forever.
+# after its last use before being purged, so an abandoned session doesn't grow that
+# store forever.
 CONVERSATION_TTL_S = 1800.0
 
 # Delimiter the model is instructed to place between top-level sections of its response
@@ -351,6 +352,9 @@ class ConversationState:
     section_updates: dict[str, dict] = field(default_factory=dict)
     turns_used: int = 0
     created_at: float = field(default_factory=time.monotonic)
+    # Bumped by the web layer on every lookup, so CONVERSATION_TTL_S is measured from
+    # last activity - a draft someone is still actively revising/exporting never expires.
+    last_used_at: float = field(default_factory=time.monotonic)
 
 
 # Emitted by the model (see agent.md Step 8) as the very first line of its
